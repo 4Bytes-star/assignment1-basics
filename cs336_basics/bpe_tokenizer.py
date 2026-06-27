@@ -1,6 +1,7 @@
 import os
 import heapq
 from collections import Counter, defaultdict
+from collections.abc import Iterable, Iterator
 from multiprocessing import Pool
 import regex as re
 from .pretokenization_example import find_chunk_boundaries
@@ -80,7 +81,7 @@ def _get_token_counts_from_file(input_path: str, special_tokens: list[bytes]) ->
     # 注意：这里的 boundaries 只是为了把大文件切成几块给不同进程，
     # 具体的特殊 token 切分逻辑已经下沉到 process_chunk 里了
     with open(input_path, "rb") as f:
-        num_processes = 4
+        num_processes = 8
         # 假设 find_chunk_boundaries 是你之前写的按字节长度粗略切分或按换行符切分的函数
         boundaries = find_chunk_boundaries(f, num_processes, special_tokens[0])
     
@@ -103,7 +104,7 @@ def _get_token_counts_from_file(input_path: str, special_tokens: list[bytes]) ->
         
     return dict(global_token_counts)
 
-def train_bpe(input_path: str,vocab_size: int,special_tokens: list[str]) -> tuple:
+def train_bpe(input_path: str,vocab_size: int,special_tokens: list[str]) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     """
     train bpe tokenizer
     
@@ -151,13 +152,6 @@ def train_bpe(input_path: str,vocab_size: int,special_tokens: list[str]) -> tupl
                 pair_to_tokens[pair] = set()
             pair_to_tokens[pair].add(token_bytes)
             
-    def _get_best_pair(pair_counts: Counter[tuple[bytes, bytes]]):
-        # 从Counter类型中找到频率最高的pair，需要性能好
-        if not pair_counts:
-            return None
-        
-        # 使用max，key为(Count,pair)
-        return max(pair_counts,key = lambda p: (pair_counts[p],p)) 
         
     def merge_token(token:tuple[bytes,...],best_pair:tuple[bytes,bytes],new_bytes:bytes)->tuple[bytes,...]:
         new_token = []
@@ -171,12 +165,34 @@ def train_bpe(input_path: str,vocab_size: int,special_tokens: list[str]) -> tupl
                 i += 1
         return tuple(new_token)
 
+    # 使用heapq堆来优化到 O(logn)
+    class PairObj:
+        def __init__(self, count, pair):
+            self.count = count
+            self.pair = pair
+        
+        def __lt__(self, other):
+            if self.count != other.count:
+                return self.count > other.count # count大优先
+            else:
+                return self.pair > other.pair
+    pq = []
+    for p,c in pair_counts.items():
+        heapq.heappush(pq, PairObj(c,p))
+
     # 4.合并 
     while len(vocab) < vocab_size:
         # 1.找到频率最高的pair
-        best_pair = _get_best_pair(pair_counts)
+        best_pair = None
+        while pq:
+            top = heapq.heappop(pq)
+            # 懒删除检查：因为每次取出最大的pair进行合并之后，别的包含这个pair其中元素的pair也需要跟着变
+            # 这里我们选择懒更新，每次取出来之后，只有当其等于真实的count时才是有效的，否则删除
+            if top.count == pair_counts.get(top.pair,0): # pair_counts里面的元素都是最新状态
+                best_pair = top.pair
+                break
         
-        if best_pair is None:
+        if best_pair is None or pair_counts[best_pair] < 1:
             break
         
         # 2.合并 并写入vocab中
@@ -205,6 +221,10 @@ def train_bpe(input_path: str,vocab_size: int,special_tokens: list[str]) -> tupl
                     pair_counts[p] -= count
                     if pair_counts[p] <= 0:
                         del pair_counts[p]
+                        # 懒删除，只删除真实计数器，堆内等pop出来比对一下是否有效即可
+                    else:
+                        # 只要这个pair还有剩余，就得把新的状态压入堆内
+                        heapq.heappush(pq, PairObj(pair_counts[p], p))
                         
                     if p in pair_to_tokens:
                         pair_to_tokens[p].discard(old_token)
@@ -228,9 +248,134 @@ def train_bpe(input_path: str,vocab_size: int,special_tokens: list[str]) -> tupl
                 for i in range(len(new_token) - 1):
                     p = (new_token[i], new_token[i+1])
                     pair_counts[p] += count
-                    
+                    # 更新堆内的pair的count数
+                    heapq.heappush(pq, PairObj(pair_counts[p], p))
+
                     if p not in pair_to_tokens:
                         pair_to_tokens[p] = set()
                     pair_to_tokens[p].add(new_token)
     
     return vocab,merges
+
+class BPE:
+    def __init__(self, vocab: dict[int, bytes], merges: list[tuple[bytes, bytes]], special_tokens: list[str] | None = None):
+        """
+        vocab: 初始词汇表{index: character}
+        merges:BPE合并规则表 [(subword1,subword2),...]
+        special_tokens:特殊token
+        """
+        self.vocab = vocab
+        self.merges = merges
+        self.special_tokens = special_tokens
+    
+    @classmethod
+    def from_files(cls, vocab_filepath: str, merges_filepath: str, special_tokens: list[str] | None = None):
+        """
+        从序列化文件构建并返回tokenizer
+        """
+        import json
+        
+        # 1.加载vocab.json
+        vocab = {}
+        with open(vocab_filepath, "r", encoding="utf-8") as f:
+            vocab_json = json.load(f)
+            for k, v in vocab_json.item():
+                vocab[int(k)] = v.encode("latin-1")
+        
+        # 2.加载merges
+        merges = []
+        with open(merges_filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                clean_line = line.rstrip("\n")
+                if not clean_line:
+                    continue
+                parts = clean_line.rsplit(" ", 1)
+                if len(parts) == 2:
+                    p1 = parts[0].encode("latin-1")
+                    p2 = parts[1].encode("latin-2")
+                    merges.append((p1, p2))
+        
+        # 3.构建并返回BPE实例
+        return cls(vocab=vocab, merges=merges, special_tokens=special_tokens)
+    
+    def decode(self, ids: list[int]) -> str:
+        """
+        将token转为str
+        """
+        # 建立 id -> token 的反向映射
+        bytes_tokens = [self.vocab.get(id) for id in ids]    
+        combined_bytes = b"".join(bytes_tokens)
+    
+        return combined_bytes.decode('utf-8', errors='replace')
+    
+    def encode(self, text: str) -> list[int]:
+        """
+        将文本文件转换成token id列表
+        1. special_token切分文档
+        2. pretokenize
+        3. emerge
+        """
+        bpe_tokens = []
+        
+        # 构造正则pattern
+        if self.special_tokens:
+            sorted_special_tokens = sorted(self.special_tokens, key=len, reverse=True)
+            escaped_tokens = [f"({re.escape(t)})" for t in sorted_special_tokens]
+            pattern = "|".join(escaped_tokens)
+
+            # 切分文档并处理
+            parts = re.split(pattern, text)
+        else:
+            parts = [text]
+
+        bytes_to_id = {v: k for k,v in self.vocab.items()}
+        rank = {pair: i for i, pair in enumerate(self.merges)}
+        
+        for part in parts:
+            if not part:
+                continue
+            if self.special_tokens and part in self.special_tokens:
+                # 找到special token的id
+                spec_token_bytes = part.encode('utf-8')
+                bpe_tokens.append(bytes_to_id.get(spec_token_bytes))
+            else:
+                # 普通文本进行pretokenize
+                # 1. 用PRETOKENIZE_PATTERN来切分出pretokens
+                for match in re.finditer(PRETOKENIZE_PATTERN, part):
+                    word_bytes = match.group(0).encode('utf-8')
+
+                    # 2. 变成单字节列表
+                    word_list = [bytes([b]) for b in word_bytes]
+                    
+                    # 3. 循环合并
+                    while len(word_list) >= 2:
+                        # word并不是很长，先直接遍历所有pair
+                        min_pos = len(word_list)
+                        min_id = len(self.merges)
+                        for i in range(len(word_list) - 1):
+                            pair = (word_list[i], word_list[i+1])
+                            pair_id = rank.get(pair) # 得到rankd_id
+                            if pair_id is not None and pair_id < min_id:
+                                min_id = pair_id
+                                min_pos = i
+                        # 遍历完，如果找到可以合并的就合并，找不到就退出while
+                        if min_pos != len(word_list):
+                            #  合并第i和第i+1个元素
+                            word_list[min_pos] = word_list[min_pos] + word_list[min_pos+1]
+                            word_list.pop(min_pos+1)
+                        else:
+                            break
+                    
+                    # 把合并完的word_list 里每个bytes查出id并append入结果
+                    for token_byte in word_list:
+                        bpe_tokens.append(bytes_to_id[token_byte])
+
+        return bpe_tokens
+
+    def encode_iterable(self, iterable: Iterable[str])-> Iterator[int]:
+        """
+        流式编码， 按块读取节省内存
+        """
+        for text_chunk in iterable:
+            for token_id in self.encode(text_chunk):
+                yield token_id
