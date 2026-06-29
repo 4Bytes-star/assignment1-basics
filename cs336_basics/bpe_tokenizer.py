@@ -267,6 +267,8 @@ class BPE:
         self.vocab = vocab
         self.merges = merges
         self.special_tokens = special_tokens
+        self.bytes_to_id = {v: k for k,v in self.vocab.items()}
+        self.rank = {pair: i for i, pair in enumerate(self.merges)}
     
     @classmethod
     def from_files(cls, vocab_filepath: str, merges_filepath: str, special_tokens: list[str] | None = None):
@@ -279,7 +281,7 @@ class BPE:
         vocab = {}
         with open(vocab_filepath, "r", encoding="utf-8") as f:
             vocab_json = json.load(f)
-            for k, v in vocab_json.item():
+            for k, v in vocab_json.items():
                 vocab[int(k)] = v.encode("latin-1")
         
         # 2.加载merges
@@ -292,7 +294,7 @@ class BPE:
                 parts = clean_line.rsplit(" ", 1)
                 if len(parts) == 2:
                     p1 = parts[0].encode("latin-1")
-                    p2 = parts[1].encode("latin-2")
+                    p2 = parts[1].encode("latin-1")
                     merges.append((p1, p2))
         
         # 3.构建并返回BPE实例
@@ -328,8 +330,7 @@ class BPE:
         else:
             parts = [text]
 
-        bytes_to_id = {v: k for k,v in self.vocab.items()}
-        rank = {pair: i for i, pair in enumerate(self.merges)}
+        # bytes_to_id以及rank这两个表应该只需要随着tokenizer实例化而构建一次，直接作为tokenizer的属性构建一次即可
         
         for part in parts:
             if not part:
@@ -337,7 +338,7 @@ class BPE:
             if self.special_tokens and part in self.special_tokens:
                 # 找到special token的id
                 spec_token_bytes = part.encode('utf-8')
-                bpe_tokens.append(bytes_to_id.get(spec_token_bytes))
+                bpe_tokens.append(self.bytes_to_id.get(spec_token_bytes))
             else:
                 # 普通文本进行pretokenize
                 # 1. 用PRETOKENIZE_PATTERN来切分出pretokens
@@ -354,7 +355,7 @@ class BPE:
                         min_id = len(self.merges)
                         for i in range(len(word_list) - 1):
                             pair = (word_list[i], word_list[i+1])
-                            pair_id = rank.get(pair) # 得到rankd_id
+                            pair_id = self.rank.get(pair) # 得到rankd_id
                             if pair_id is not None and pair_id < min_id:
                                 min_id = pair_id
                                 min_pos = i
@@ -368,7 +369,7 @@ class BPE:
                     
                     # 把合并完的word_list 里每个bytes查出id并append入结果
                     for token_byte in word_list:
-                        bpe_tokens.append(bytes_to_id[token_byte])
+                        bpe_tokens.append(self.bytes_to_id[token_byte])
 
         return bpe_tokens
 
