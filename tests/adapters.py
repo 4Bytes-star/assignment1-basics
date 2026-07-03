@@ -28,9 +28,13 @@ def run_linear(
     Returns:
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
-
-    raise NotImplementedError
-
+    from cs336_basics.modules import linear
+    my_linear = linear(d_in, d_out)
+    state_dict = {
+        'W': weights
+    }
+    my_linear.load_state_dict(state_dict=state_dict)
+    return my_linear.forward(in_features)
 
 def run_embedding(
     vocab_size: int,
@@ -50,9 +54,13 @@ def run_embedding(
     Returns:
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
-
-    raise NotImplementedError
-
+    from cs336_basics.modules import embedding
+    state_dict = {
+        'matrix' : weights
+    }
+    my_embedding = embedding(vocab_size, d_model)
+    my_embedding.load_state_dict(state_dict=state_dict)
+    return my_embedding.forward(token_ids)
 
 def run_swiglu(
     d_model: int,
@@ -83,8 +91,14 @@ def run_swiglu(
     # swiglu.w1.weight.data = w1_weight
     # swiglu.w2.weight.data = w2_weight
     # swiglu.w3.weight.data = w3_weight
-    raise NotImplementedError
+    from cs336_basics.modules import FeedForward
+    model = FeedForward(d_model, d_ff)
 
+    model.w1.W.data = w1_weight
+    model.w2.W.data = w2_weight
+    model.w3.W.data = w3_weight
+    
+    return model(in_features)
 
 def run_scaled_dot_product_attention(
     Q: Float[Tensor, " ... queries d_k"],
@@ -104,8 +118,8 @@ def run_scaled_dot_product_attention(
     Returns:
         Float[Tensor, " ... queries d_v"]: Output of SDPA
     """
-    raise NotImplementedError
-
+    from cs336_basics.nn_utils import scaled_dot_product_attention
+    return scaled_dot_product_attention(Q, K, V, mask)
 
 def run_multihead_self_attention(
     d_model: int,
@@ -200,8 +214,9 @@ def run_rope(
     Returns:
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
     """
-    raise NotImplementedError
-
+    from cs336_basics.modules import RotaryPositionalEmbedding
+    my_rope = RotaryPositionalEmbedding(d_k=d_k, theta=theta, max_seq_len=max_seq_len)
+    return my_rope.forward(in_query_or_key, token_positions)
 
 def run_transformer_block(
     d_model: int,
@@ -378,8 +393,13 @@ def run_rmsnorm(
         Float[Tensor,"... d_model"]: Tensor of with the same shape as `in_features` with the output of running
         RMSNorm of the `in_features`.
     """
-    raise NotImplementedError
-
+    from cs336_basics.modules import rmsnorm
+    my_rmsnorm = rmsnorm(d_model, eps)
+    state_dict = {
+        'gain' : weights
+    }
+    my_rmsnorm.load_state_dict(state_dict)
+    return my_rmsnorm.forward(in_features)
 
 def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
     """Given a tensor of inputs, return the output of applying SiLU
@@ -431,8 +451,8 @@ def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, "
         Float[Tensor, "..."]: Tensor of with the same shape as `in_features` with the output of
         softmax normalizing the specified `dim`.
     """
-    raise NotImplementedError
-
+    from cs336_basics.nn_utils import softmax
+    return softmax(in_features, dim)
 
 def run_cross_entropy(
     inputs: Float[Tensor, " batch_size vocab_size"], targets: Int[Tensor, " batch_size"]
