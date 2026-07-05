@@ -2,15 +2,14 @@ import torch
 import torch.nn as nn
 import math
 import numpy as np
-from jaxtyping import Float
+from jaxtyping import Bool, Float, Int
 from torch import Tensor
-from einops import einsum
+from einops import einsum, rearrange
 
 class linear(nn.Module):
     def __init__(self, in_features: int, out_features: int, device=None, dtype=None):
         """
-        Construct a linear 
-        transformation module. This function should accept the following parameters:
+        Construct a linear transformation module. This function should accept the following parameters:
             in_features: int  final dimension of the input
             out_features: int  final dimension of the output
             device: torch.device | None = None  Device to store the parameters on
@@ -173,3 +172,75 @@ class RotaryPositionalEmbedding(nn.Module):
         return out
         
         
+class multihead_self_attention(nn.Module):
+    def __init__(self, d_model: int, num_heads: int):
+        super().__init__()
+        assert d_model % num_heads == 0, "d_model 必须能被n_heads 整除"
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_head = d_model // num_heads
+        
+        # define the Q,K,V matrix together
+        self.qkv_proj = linear(d_model, 3 * d_model)
+        
+        self.out_proj = linear(d_model, d_model)
+        
+    def forward(self, x: torch.Tensor):
+        # x: [batch, seq_len, d_model]
+        batch, seq_len, _ = x.shape
+        
+        # 1.cal the Q,K,V
+        qkv = self.qkv_proj(x)
+
+        # 2.rearrange 
+        qkv = rearrange(qkv, 'b s (three h d) -> three b h s d', three=3, h=self.num_heads)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        # Q = rearrange(Q, 'b s (h d) -> b h s d',h = self.num_heads)
+        # K = rearrange(K, 'b s (h d) -> b h s d',h = self.num_heads)
+        # V = rearrange(V, 'b s (h d) -> b h s d',h = self.num_heads)
+
+        # 3.implement the casual mask
+        mask = torch.ones(seq_len, seq_len, dtype=torch.bool, device=x.device)
+        mask = torch.tril(mask)
+
+        from cs336_basics.nn_utils import scaled_dot_product_attention
+        output = scaled_dot_product_attention(q, k, v, mask)
+        output = rearrange(output, 'b h s d -> b s (h d)')
+        
+        return self.out_proj(output)
+
+        
+class multihead_self_attention_with_rope(nn.Module):
+    def __init__(self, d_model: int, num_heads: int, RoPE: RotaryPositionalEmbedding):
+        super().__init__()
+        assert d_model % num_heads == 0, "d_model 必须能被n_heads 整除"
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_head = d_model // num_heads
+        
+        # define the Q,K,V matrix together
+        self.qkv_proj = linear(d_model, 3 * d_model)        
+        self.out_proj = linear(d_model, d_model)
+        self.RoPE:RotaryPositionalEmbedding = RoPE
+    
+    def forward(self, x: torch.Tensor, token_positions: Int[Tensor, " ... sequence_length"] | None = None):
+        batch, seq_len, _ = x.shape
+
+        # 1.cal the Q,K,V
+        qkv = self.qkv_proj(x)
+
+        # 2.rearrange
+        qkv = rearrange(qkv, 'b s (three h d) -> three b h s d', three=3, h=self.num_heads)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        
+        # 3.implement the casual mask
+        mask = torch.ones(seq_len, seq_len, dtype=torch.bool, device=x.device)
+        mask = torch.tril(mask)
+        from cs336_basics.nn_utils import scaled_dot_product_attention
+        q = self.RoPE(q, token_positions)
+        k = self.RoPE(k, token_positions)
+
+        output = scaled_dot_product_attention(q, k, v, mask)
+        output = rearrange(output, 'b h s d -> b s (h d)')
+
+        return self.out_proj(output)
