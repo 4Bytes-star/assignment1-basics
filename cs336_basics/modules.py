@@ -134,26 +134,36 @@ class FeedForward(nn.Module):
 class RotaryPositionalEmbedding(nn.Module):
     def __init__(self, theta: float, d_k: int, max_seq_len: int, device=None):
         super().__init__()
-        self.d_k = d_k
-        self.theta = theta
-        self.max_seq_len = max_seq_len
-        
         # 1. Construct the freqs: [d_k/2]
         # formula: theta ^ (-2i / d_k),i: 0~d_2-1
         i = torch.arange(0, d_k, 2, device=device).float()
-        self.freqs = 1.0 / (theta ** (i / d_k))
+        freqs = 1.0 / (theta ** (i / d_k))
         
+        # 2.cal the max seq position cos ans sin,then cache the results
+        max_token_position = torch.arange(max_seq_len)
+        cached_position_angles = max_token_position.unsqueeze(-1) * freqs.to(device)
+        self.cached_cos = torch.cos(cached_position_angles)
+        self.cached_sin = torch.sin(cached_position_angles)
+        
+        # 3.使用register_buffer保存状态, 可随设备迁移
+        self.register_buffer("cos_cached", self.cached_cos, persistent=False)
+        self.register_buffer("sin_cached", self.cached_sin, persistent=False)
         
     def forward(self, x: torch.Tensor, token_position: torch.Tensor) -> torch.Tensor:
         # x shape ： (..., seq_len, d_k)
         # token_position shape: (..., seq_len)
         # 2. Compute the angles: (..., seq_len, d_k/2)
         # use the pytorch broadcast: (..., seq_len, 1) * (d_k / 2) -> (..., seq_len, d_k / 2)        
-        angles = token_position.unsqueeze(-1) * self.freqs.to(token_position.device)
+        if token_position is None:
+            token_position = torch.arange(x.shape[-2])
+        # angles = token_position.unsqueeze(-1) * self.freqs.to(token_position.device)
 
         # 3.Compute cos and sin
-        cos = torch.cos(angles)
-        sin = torch.sin(angles)
+        # cos = torch.cos(angles)
+        # sin = torch.sin(angles)
+        # 已经缓存了cos 和sin，直接索引即可
+        selected_cos = self.cached_cos[token_position]
+        selected_sin = self.cached_sin[token_position]
 
         # 4.split the input tensor
         x_even = x[..., ::2]
@@ -162,8 +172,8 @@ class RotaryPositionalEmbedding(nn.Module):
         # 5.rotate 
         # x_{2i} = x_{2i} * cos - x{2i+1} * sin
         # x_{2i+1} = x_{2i} * sin + x{2i+1} * cos
-        x_prime_even = x_even * cos - x_odd * sin
-        x_prime_odd = x_even * sin + x_odd * cos
+        x_prime_even = x_even * selected_cos - x_odd * selected_sin
+        x_prime_odd = x_even * selected_sin + x_odd * selected_cos
         
         out = torch.empty_like(x)
         out[..., ::2] = x_prime_even
@@ -244,3 +254,56 @@ class multihead_self_attention_with_rope(nn.Module):
         output = rearrange(output, 'b h s d -> b s (h d)')
 
         return self.out_proj(output)
+    
+class transformer_block(nn.Module):
+    def __init__(self, d_model: int, num_heads: int, d_ff: int, theta: float, max_seq_len: int):        
+        super().__init__()
+        self.rmsnorm1 = rmsnorm(d_model)
+        self.rmsnorm2 = rmsnorm(d_model)
+        rope = RotaryPositionalEmbedding(theta, d_model//num_heads, max_seq_len)
+        self.casual_multihead_self_attn = multihead_self_attention_with_rope(d_model, num_heads, rope)
+
+        self.ffn = FeedForward(d_model, d_ff)
+    
+    def forward(self, x: torch.Tensor) -> Float[Tensor, " batch_size seq_len d_model"]:
+        y = x + self.casual_multihead_self_attn(self.rmsnorm1(x))
+
+        z = y + self.ffn(self.rmsnorm2(y))
+
+        return z
+
+class transformer_lm(nn.Module):
+    def __init__(self,
+        vocab_size: int,
+        context_length: int,
+        d_model: int, 
+        num_layers: int,
+        num_heads: int, 
+        d_ff: int, 
+        rope_theta: float,
+    ):
+        super().__init__()
+        self.embedding = embedding(vocab_size, d_model)
+        self.layers = nn.ModuleList()
+        for i in range(num_layers):
+            self.layers.append(transformer_block(d_model=d_model, num_heads=num_heads, d_ff=d_ff, theta=rope_theta, max_seq_len=context_length))
+        self.norm = rmsnorm(d_model=d_model)
+        self.lm_head = linear(d_model, vocab_size)
+
+    def forward(self, in_indices: Int[Tensor, " batch_size seq_len"]) -> Float[Tensor, " batch_size seq_len vocab_size"]:
+        # 1.先经过embedding
+        x = self.embedding(in_indices)
+        # after this the shape is (batch_size seq_len d_model)
+        
+        # 2.进入transformer block
+        for layer in self.layers:
+            x = layer(x)
+        
+        # 3.出来后经过一个norm
+        y = self.norm(x)
+        
+        z_probs = self.lm_head(y)
+        # from cs336_basics.nn_utils import softmax
+        # z_probs = softmax(z_probs, dim=-1)
+        
+        return z_probs

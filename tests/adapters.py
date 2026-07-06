@@ -302,8 +302,20 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+    from cs336_basics.modules import transformer_block
+    my_transformer_block = transformer_block(d_model, num_heads, d_ff, theta, max_seq_len)
+    with torch.no_grad():
+        my_transformer_block.rmsnorm1.gain.copy_(weights['ln1.weight'])
+        my_transformer_block.rmsnorm2.gain.copy_(weights['ln2.weight'])
+        qkv_proj = torch.cat([weights['attn.q_proj.weight'], weights['attn.k_proj.weight'], weights['attn.v_proj.weight']], dim=0)
+        my_transformer_block.casual_multihead_self_attn.qkv_proj.W.copy_(qkv_proj)
+        my_transformer_block.casual_multihead_self_attn.out_proj.W.copy_(weights['attn.output_proj.weight'])
 
+        my_transformer_block.ffn.w1.W.copy_(weights['ffn.w1.weight'])
+        my_transformer_block.ffn.w2.W.copy_(weights['ffn.w2.weight'])
+        my_transformer_block.ffn.w3.W.copy_(weights['ffn.w3.weight'])
+    
+    return my_transformer_block(in_features)
 
 def run_transformer_lm(
     vocab_size: int,
@@ -384,8 +396,23 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+    from cs336_basics.modules import transformer_lm
+    my_lm = transformer_lm(vocab_size, context_length, d_model, num_layers, num_heads, d_ff, rope_theta)
+    with torch.no_grad():
+        my_lm.embedding.matrix.copy_(weights['token_embeddings.weight'])
+        for i in range(num_layers):
+            my_lm.layers[i].rmsnorm1.gain.copy_(weights[f"layers.{i}.ln1.weight"])
+            my_lm.layers[i].rmsnorm2.gain.copy_(weights[f"layers.{i}.ln2.weight"])
+            qkv_proj = torch.cat([weights[f"layers.{i}.attn.q_proj.weight"], weights[f"layers.{i}.attn.k_proj.weight"], weights[f"layers.{i}.attn.v_proj.weight"]], dim=0)
+            my_lm.layers[i].casual_multihead_self_attn.qkv_proj.W.copy_(qkv_proj)
+            my_lm.layers[i].casual_multihead_self_attn.out_proj.W.copy_(weights[f"layers.{i}.attn.output_proj.weight"])
 
+            my_lm.layers[i].ffn.w1.W.copy_(weights[f"layers.{i}.ffn.w1.weight"])
+            my_lm.layers[i].ffn.w2.W.copy_(weights[f"layers.{i}.ffn.w2.weight"])
+            my_lm.layers[i].ffn.w3.W.copy_(weights[f"layers.{i}.ffn.w3.weight"])
+        my_lm.norm.gain.copy_(weights['ln_final.weight'])
+        my_lm.lm_head.W.copy_(weights['lm_head.weight'])
+    return my_lm(in_indices)
 
 def run_rmsnorm(
     d_model: int,
@@ -426,7 +453,8 @@ def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
         Float[Tensor,"..."]: of with the same shape as `in_features` with the output of applying
         SiLU to each element.
     """
-    raise NotImplementedError
+    from cs336_basics.nn_utils import SiLU
+    return SiLU(in_features)
 
 
 def run_get_batch(

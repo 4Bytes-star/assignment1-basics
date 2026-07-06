@@ -1,7 +1,7 @@
 import torch
 from einops import einsum
 from torch import Tensor
-from jaxtyping import Float, Bool
+from jaxtyping import Float, Bool, Int
 
 def softmax(tensor: torch.Tensor, dim: int) -> torch.Tensor:
     """
@@ -29,6 +29,11 @@ def softmax(tensor: torch.Tensor, dim: int) -> torch.Tensor:
 
     # 5.return the probability distribution
     return exp_tensor / sum_exp
+    
+def SiLU(x: torch.Tensor) -> torch.Tensor:
+    return x * torch.sigmoid(x)
+
+# def cross_entropy(x: Float[Tensor, " batch_size vocab_size"], targets: Int[Tensor, " batch_size"]) -> Float[Tensor, ""]:
     
     
 def scaled_dot_product_attention(
