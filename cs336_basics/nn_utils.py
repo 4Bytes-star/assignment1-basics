@@ -69,3 +69,27 @@ def scaled_dot_product_attention(
     output = einsum(attn_probs, V, "... queries keys, ... keys d_v -> ... queries d_v")
     
     return output
+
+def cross_entropy(
+    logits: Float[Tensor, " batch_size vocab_size"], targets: Int[Tensor, " batch_size"]
+):
+    """
+    Args:
+        inputs (Float[Tensor, "batch_size vocab_size"]): inputs[i][j] is the
+            unnormalized logit of jth class for the ith example.
+        targets (Int[Tensor, "batch_size"]): Tensor of shape (batch_size,) with the index of the correct class.
+            Each value must be between 0 and `num_classes - 1`. 
+    
+    Returns:
+        Float[Tensor, ""]: The average cross-entropy loss across examples.
+    """
+    # 数值稳定的log_softmax: log(sofxmax(x)) = x - logsumexp(x)
+    log_probs = logits - torch.logsumexp(logits, dim=-1, keepdim=True)
+
+    # 取出每个样本对应正确类别的 log 概率
+    # gather 需要索引与 log_probs 维度匹配，目标形状：(batch_size, 1) -> squeeze 为 (batch_size,)
+    log_probs_target = log_probs.gather(dim=-1, index=targets.unsqueeze(-1)).squeeze(-1)
+    
+    loss = -log_probs_target.mean()
+    
+    return loss
